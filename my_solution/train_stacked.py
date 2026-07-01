@@ -250,6 +250,54 @@ def plot_prob_kde(p_ev, out_path, title, low=0.2, high=0.8):
     plt.tight_layout(); plt.savefig(out_path, dpi=90); plt.close()
 
 
+def plot_prob_kde_stack(probs_list, labels, prob_avg, out_path, title, low=0.2, high=0.8):
+    """KDE PER MEMBER (cienkie kolorowe linie) + uśredniona predykcja stacka (gruba czarna).
+    Diagnostyka: jeśli pojedyncze modele mają masę w ogonach (<low / >high), a dopiero
+    czarna średnia jest ściśnięta do 0.5 -> niski balance to efekt USREDNIANIA, nie modeli.
+    Fallback na histogram (step) gdy brak scipy / rozkład zdegenerowany."""
+    try:
+        import matplotlib
+        matplotlib.use("Agg")
+        import matplotlib.pyplot as plt
+    except Exception as e:
+        print(f"   (KDE pominięty, brak matplotlib: {e})")
+        return
+    try:
+        from scipy.stats import gaussian_kde
+    except Exception:
+        gaussian_kde = None
+    grid = np.linspace(0, 1, 400)
+    fig, ax = plt.subplots(figsize=(10, 5))
+
+    def _draw(p, **kw):
+        p = np.asarray(p, dtype=float); p = p[np.isfinite(p)]
+        if p.size == 0:
+            return
+        if gaussian_kde is not None and np.ptp(p) > 1e-9:
+            ax.plot(grid, gaussian_kde(p)(grid), **kw)
+        else:
+            kw.pop('lw', None)
+            ax.hist(p, bins=40, range=(0, 1), density=True, histtype='step', **kw)
+
+    for p, lab in zip(probs_list, labels):
+        pf = np.asarray(p, dtype=float); pf = pf[np.isfinite(pf)]
+        if pf.size == 0:
+            continue
+        fl = float(np.mean(pf < low)); fh = float(np.mean(pf > high))
+        _draw(p, lw=1.2, alpha=0.75, label=f"{lab}  <{low}:{fl:.2f} >{high}:{fh:.2f}")
+
+    pa = np.asarray(prob_avg, dtype=float); pa = pa[np.isfinite(pa)]
+    fl = float(np.mean(pa < low)); fh = float(np.mean(pa > high)); bal = min(fl, fh)
+    _draw(prob_avg, lw=3.2, color='black',
+          label=f"ŚREDNIA(stack)  <{low}:{fl:.2f} >{high}:{fh:.2f}")
+
+    ax.axvline(low, ls='--', color='green'); ax.axvline(high, ls='--', color='red')
+    ax.set_xlim(0, 1); ax.set_xlabel('predykcja p (prd_eval)'); ax.set_ylabel('gęstość')
+    ax.set_title(f"{title}\nper-model KDE + średnia stacka | balance(stack)={bal:.3f}")
+    ax.legend(loc='upper center', fontsize=8, ncol=2)
+    plt.tight_layout(); plt.savefig(out_path, dpi=90); plt.close()
+
+
 def train_one_model(mtype, feature, med, train, test, prd_fit, prd_eval,
                     fit_on, pseudo, params=None, spw=1.0,
                     pseudo_low=DEFAULT_PSEUDO_LOW, pseudo_high=DEFAULT_PSEUDO_HIGH):
@@ -401,9 +449,11 @@ def build_stack(ks_features, train, test, prd_fit, prd_eval, fit_on, pseudo,
     reward_full, m_full = validator_reward(prob_te_avg, test['label'].values)
     balance = min(np.mean(prob_ev_avg < 0.2), np.mean(prob_ev_avg > 0.8))
 
-    # KDE rozkładu uśrednionych proby stacka na prd_eval — źródło metryki balance.
-    plot_prob_kde(prob_ev_avg, os.path.join(analysis_dir, "prob_kde.png"),
-                  f"{title or os.path.basename(analysis_dir)} (balance={round(balance,3)})")
+    # KDE per member + gruba linia średniej stacka — źródło metryki balance.
+    mtypes = [a['mtype'] for a in members]
+    plot_prob_kde_stack(probs_ev, mtypes, prob_ev_avg,
+                        os.path.join(analysis_dir, "prob_kde.png"),
+                        title or os.path.basename(analysis_dir))
 
     stack_artifact = {'kind': 'mean_stack', 'members': members,
                       'model_types': [a['mtype'] for a in members]}
