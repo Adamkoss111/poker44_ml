@@ -4,12 +4,19 @@ prd_data/
 saved_synapses/
 *.csv
 *:Zone.Identifier
+*mshield
+*:mshield
+
+# prywatny kontekst/strategia — NIGDY publicznie
+*POKER44_CONTEXT*
 
 # === runtime / cache / artefakty ===
 logs/
 __pycache__/
 *.py[cod]
 *.joblib
+!published/*.joblib
+models/
 production_models/
 my_models/
 .venv/
