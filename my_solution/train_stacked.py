@@ -246,8 +246,10 @@ def search_ks_for_model(mtype, ks_features, train, test, prd_fit, prd_eval,
     """Szuka najlepszego KS dla JEDNEGO typu modelu (domyślne HP). Zwraca (best_ks, log_df)."""
     best = None; rows = []
     for ks, (feat, med) in ks_features.items():
+        # SELEKCJA KS: ZAWSZE trenuj na train, oceniaj na held-out test (uczciwie).
+        # Prawdziwe fit_on wchodzi dopiero do finalnego artefaktu (build_stack).
         _, _, _, m = train_one_model(mtype, feat, med, train, test, prd_fit, prd_eval,
-                                     fit_on, pseudo, params=DEFAULT_PARAMS[mtype], spw=spw,
+                                     "train", pseudo, params=DEFAULT_PARAMS[mtype], spw=spw,
                                      pseudo_low=pseudo_low, pseudo_high=pseudo_high)
         rows.append({'ks': ks, **m})
         if best is None or m['sel_score'] > best[1]:
@@ -308,11 +310,22 @@ def build_stack(ks_features, train, test, prd_fit, prd_eval, fit_on, pseudo,
                 fit_on, pseudo, hpo_n_iter, pseudo_low, pseudo_high, spw=spw)
             hpo_log.to_csv(os.path.join(analysis_dir, f"hpo_{mtype}.csv"), index=False)
 
-        # 3) finalny model (fit_on decyduje train vs train+test)
-        art, prob_te, prob_ev, m = train_one_model(
+        # 3a) UCZCIWE predykcje członka (train -> held-out test) — TE idą do metryk
+        #     i sortu stacka. Bez tego członkowie train+test dawaliby in-sample prob_te.
+        art_honest, prob_te, prob_ev, m = train_one_model(
             mtype, feat, med, train, test, prd_fit, prd_eval,
-            fit_on, pseudo, params=best_params, spw=spw,
+            "train", pseudo, params=best_params, spw=spw,
             pseudo_low=pseudo_low, pseudo_high=pseudo_high)
+
+        # 3b) FINALNY artefakt produkcyjny: refit na prawdziwym fit_on (train+test gdy
+        #     wybrane). prob_te z tego modelu byłoby in-sample, więc go NIE używamy do metryk.
+        if fit_on != "train":
+            art, _, _, _ = train_one_model(
+                mtype, feat, med, train, test, prd_fit, prd_eval,
+                fit_on, pseudo, params=best_params, spw=spw,
+                pseudo_low=pseudo_low, pseudo_high=pseudo_high)
+        else:
+            art = art_honest
 
         art['best_ks'] = best_ks
         members.append(art)
