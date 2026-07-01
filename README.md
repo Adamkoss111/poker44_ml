@@ -11,6 +11,57 @@
 
 ---
 
+## This Fork — 24-Miner Deployment
+
+This repository is a competition deployment that runs a **fleet of 24 miners**, each
+serving its **own** trained model (12 single XGBoost models + 12 stacked models). Every
+miner publishes a compliant `model_manifest` with its own repo commit and artifact hash,
+so each of the 24 UIDs has a distinct, verifiable identity.
+
+### Where the models live
+- `models/` — your trained models, **staging for publishing** (git-ignored).
+  Names: `model1.joblib` … `model12.joblib`, `stack1.joblib` … `stack12.joblib`.
+- `published/` — models **served at runtime** (created automatically when you publish).
+  The miners load from here.
+
+### One-time environment setup
+```bash
+pip install -e .
+pip install catboost        # required by the stacked miners (miner18, miner22–32)
+```
+
+### Publish models (one model = one commit)
+Put the trained models in `models/`, then:
+```bash
+python scripts/publish_all.py
+```
+This commits each model on its own (one model per commit), copies all of them into
+`published/`, writes `published/commit_map.json`, and pushes once.
+
+### After changing miner code (not models)
+```bash
+git add -A && git commit -m "..." && git push
+```
+Always commit code **before** publishing models.
+
+### Run the miners
+If the miners run on a different machine than the one you publish from, pull first:
+```bash
+git pull
+```
+Then start your 24-miner launcher. Each `neurons/minerN.py` loads its model from
+`published/` and reads its pinned commit from `published/commit_map.json` — no per-miner
+environment variables required.
+
+### Miner → model mapping
+| miner | model file |
+| --- | --- |
+| miner1 – miner12 | `model1.joblib` … `model12.joblib` |
+| miner18 | `stack1.joblib` |
+| miner22 – miner32 | `stack2.joblib` … `stack12.joblib` |
+
+---
+
 ## Official Links
 
 - X: https://x.com/poker44subnet
