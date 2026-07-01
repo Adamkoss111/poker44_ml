@@ -179,6 +179,48 @@ def _pseudo_rows(feature, med, train, prd_fit, spw, params, pseudo_low, pseudo_h
     return X_ps, y_ps
 
 
+def plot_prob_kde(p_ev, out_path, title, low=0.2, high=0.8):
+    """KDE rozkładu predykcji p_ev na prd_eval — DOKŁADNIE te proby, z których liczony
+    jest balance = min(frac(p<low), frac(p>high)). Zaznacza progi low/high i frakcje
+    po obu stronach. Fallback na histogram gdy brak scipy / rozkład zdegenerowany."""
+    try:
+        import matplotlib
+        matplotlib.use("Agg")
+        import matplotlib.pyplot as plt
+    except Exception as e:
+        print(f"   (KDE pominięty, brak matplotlib: {e})")
+        return
+    p = np.asarray(p_ev, dtype=float); p = p[np.isfinite(p)]
+    if p.size == 0:
+        return
+    frac_lo = float(np.mean(p < low)); frac_hi = float(np.mean(p > high))
+    bal = min(frac_lo, frac_hi)
+    fig, ax = plt.subplots(figsize=(9, 4))
+    grid = np.linspace(0, 1, 400)
+    drawn = False
+    try:
+        from scipy.stats import gaussian_kde
+        if np.ptp(p) > 1e-9:
+            dens = gaussian_kde(p)(grid)
+            ax.plot(grid, dens, color='steelblue', lw=2, label='KDE p_ev')
+            ax.fill_between(grid, dens, where=(grid < low), color='green', alpha=0.25,
+                           label=f'p<{low} (human) {frac_lo:.3f}')
+            ax.fill_between(grid, dens, where=(grid > high), color='red', alpha=0.25,
+                           label=f'p>{high} (bot) {frac_hi:.3f}')
+            drawn = True
+    except Exception:
+        pass
+    if not drawn:
+        ax.hist(p, bins=40, range=(0, 1), density=True, color='steelblue', alpha=0.7,
+                label='hist p_ev')
+    ax.axvline(low, ls='--', color='green'); ax.axvline(high, ls='--', color='red')
+    ax.set_xlim(0, 1); ax.set_xlabel('predykcja p (prd_eval)'); ax.set_ylabel('gęstość')
+    ax.set_title(f"{title}\nfrac<{low}={frac_lo:.3f}  frac>{high}={frac_hi:.3f}  "
+                 f"balance={bal:.3f}")
+    ax.legend(loc='upper center', fontsize=8)
+    plt.tight_layout(); plt.savefig(out_path, dpi=90); plt.close()
+
+
 def _eval_on_test(qt_train, model, test, feature, med):
     """Liczy day_df + sel_score na TEST dla gotowego (qt, model)."""
     prob_te = model.predict_proba(qt_train.transform(test[feature].fillna(med)))[:, 1]
@@ -292,7 +334,8 @@ def train_one(feature, med, train, test, prd_fit, prd_eval, spw, fit_on, pseudo,
 
     artifact = {'feature': feature, 'median': med,
                 'qt_train': qt_train, 'qt_prd': qt_prd, 'model': model,
-                'params': dict(params)}
+                'params': dict(params),
+                '_p_ev_eval': p_ev}   # proby na prd_eval (źródło balance); pop przed joblib.dump
     metrics = {'reward_full':round(reward_full,4),'reward_daily':round(r_daily,4),
                'reward_daily_std':round(r_std,4),
                'fpr':round(fpr,3),'bot_recall':round(recall,3),'ap':round(ap,3),
@@ -406,6 +449,7 @@ def run(df, prd, auc_,
             best_feat, best_med, train, test, prd_fit, prd_eval,
             spw, "train", pseudo, params=best_params,
             pseudo_low=pseudo_low, pseudo_high=pseudo_high)
+        p_ev_plot = best_art.get('_p_ev_eval')   # proby z których liczony jest raportowany balance
 
         # --- FINALNY ARTEFAKT PRODUKCYJNY: refit na PRAWDZIWYM fit_on ---
         # Gdy wybrano fit_on='train+test', wybrany (KS+HP) model trenujemy TERAZ na
@@ -423,7 +467,12 @@ def run(df, prd, auc_,
         best_art['tag'] = tag
 
         # --- model -> wspólny model/<nazwa>.joblib , analizy -> analysis/<nazwa>/ ---
+        best_art.pop('_p_ev_eval', None)   # nie trzymamy tablicy proby w produkcyjnym artefakcie
         joblib.dump(best_art, os.path.join(models_dir, f"{model_name}.joblib"))
+
+        # KDE rozkładu proby na prd_eval — źródło metryki balance
+        plot_prob_kde(p_ev_plot, os.path.join(analysis_dir, "prob_kde.png"),
+                      f"{combo_tag} (balance={best_m['balance_eval']})")
 
         ks_log_combo = pd.DataFrame(ks_search_combo).sort_values('ks')
         ks_log_combo['is_best'] = ks_log_combo['ks'] == best_ks

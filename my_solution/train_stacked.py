@@ -208,6 +208,48 @@ def _sel_score(day_df):
     return day_df['reward'].mean() - 0.5 * day_df['reward'].std()
 
 
+def plot_prob_kde(p_ev, out_path, title, low=0.2, high=0.8):
+    """KDE rozkładu predykcji p_ev na prd_eval — DOKŁADNIE te proby, z których liczony
+    jest balance = min(frac(p<low), frac(p>high)). Zaznacza progi low/high i frakcje
+    po obu stronach. Fallback na histogram gdy brak scipy / rozkład zdegenerowany."""
+    try:
+        import matplotlib
+        matplotlib.use("Agg")
+        import matplotlib.pyplot as plt
+    except Exception as e:
+        print(f"   (KDE pominięty, brak matplotlib: {e})")
+        return
+    p = np.asarray(p_ev, dtype=float); p = p[np.isfinite(p)]
+    if p.size == 0:
+        return
+    frac_lo = float(np.mean(p < low)); frac_hi = float(np.mean(p > high))
+    bal = min(frac_lo, frac_hi)
+    fig, ax = plt.subplots(figsize=(9, 4))
+    grid = np.linspace(0, 1, 400)
+    drawn = False
+    try:
+        from scipy.stats import gaussian_kde
+        if np.ptp(p) > 1e-9:
+            dens = gaussian_kde(p)(grid)
+            ax.plot(grid, dens, color='steelblue', lw=2, label='KDE p_ev')
+            ax.fill_between(grid, dens, where=(grid < low), color='green', alpha=0.25,
+                           label=f'p<{low} (human) {frac_lo:.3f}')
+            ax.fill_between(grid, dens, where=(grid > high), color='red', alpha=0.25,
+                           label=f'p>{high} (bot) {frac_hi:.3f}')
+            drawn = True
+    except Exception:
+        pass
+    if not drawn:
+        ax.hist(p, bins=40, range=(0, 1), density=True, color='steelblue', alpha=0.7,
+                label='hist p_ev')
+    ax.axvline(low, ls='--', color='green'); ax.axvline(high, ls='--', color='red')
+    ax.set_xlim(0, 1); ax.set_xlabel('predykcja p (prd_eval)'); ax.set_ylabel('gęstość')
+    ax.set_title(f"{title}\nfrac<{low}={frac_lo:.3f}  frac>{high}={frac_hi:.3f}  "
+                 f"balance={bal:.3f}")
+    ax.legend(loc='upper center', fontsize=8)
+    plt.tight_layout(); plt.savefig(out_path, dpi=90); plt.close()
+
+
 def train_one_model(mtype, feature, med, train, test, prd_fit, prd_eval,
                     fit_on, pseudo, params=None, spw=1.0,
                     pseudo_low=DEFAULT_PSEUDO_LOW, pseudo_high=DEFAULT_PSEUDO_HIGH):
@@ -293,7 +335,8 @@ def hpo_for_model(mtype, feature, med, train, test, prd_fit, prd_eval,
 
 
 def build_stack(ks_features, train, test, prd_fit, prd_eval, fit_on, pseudo,
-                do_hpo, hpo_n_iter, pseudo_low, pseudo_high, analysis_dir, spw=1.0):
+                do_hpo, hpo_n_iter, pseudo_low, pseudo_high, analysis_dir, spw=1.0,
+                title=""):
     """Buduje JEDEN stack: dla każdego z 5 modeli szuka KS+HPO, trenuje final,
     uśrednia predykcje. Zwraca (stack_artifact, metrics, prob_te_avg, prob_ev_avg)."""
     members = []
@@ -358,6 +401,10 @@ def build_stack(ks_features, train, test, prd_fit, prd_eval, fit_on, pseudo,
     reward_full, m_full = validator_reward(prob_te_avg, test['label'].values)
     balance = min(np.mean(prob_ev_avg < 0.2), np.mean(prob_ev_avg > 0.8))
 
+    # KDE rozkładu uśrednionych proby stacka na prd_eval — źródło metryki balance.
+    plot_prob_kde(prob_ev_avg, os.path.join(analysis_dir, "prob_kde.png"),
+                  f"{title or os.path.basename(analysis_dir)} (balance={round(balance,3)})")
+
     stack_artifact = {'kind': 'mean_stack', 'members': members,
                       'model_types': [a['mtype'] for a in members]}
     metrics = {'reward_full': round(reward_full, 4),
@@ -417,7 +464,8 @@ def run(df, prd, auc_,
 
         stack_art, m = build_stack(ks_features, train, test, prd_fit, prd_eval,
                                    fit_on, pseudo, do_hpo, hpo_n_iter,
-                                   pseudo_low, pseudo_high, analysis_dir, spw=spw)
+                                   pseudo_low, pseudo_high, analysis_dir, spw=spw,
+                                   title=full_name)
         stack_art['config'] = {'fit_on': fit_on, 'pseudo': pseudo, 'spw': spw,
                                'split_date': split_date}
         stack_art['tag'] = full_name
