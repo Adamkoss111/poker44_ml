@@ -308,10 +308,13 @@ def run(df, prd, auc_,
         hpo_n_iter=DEFAULT_HPO_N_ITER,
         auc_min=0.50):
     """Trenuje siatkę modeli (spw x fit_on x pseudo), w każdej kombinacji:
-      1) optymalizuje próg KS (na domyślnych hiperparametrach),
-      2) PO wyborze KS robi HPO hiperparametrów XGB (ocena tylko na test),
-      3) trenuje finalny model z najlepszymi HP (train+test jeśli fit_on tego wymaga).
-    Zwraca DataFrame z podsumowaniem.
+      1) optymalizuje próg KS (trening na train, ocena na held-out test — uczciwie),
+      2) PO wyborze KS robi HPO hiperparametrów XGB (trening na train, ocena na test),
+      3) liczy uczciwe metryki porównawcze (train -> test) do sortu 12 modeli,
+      4) trenuje FINALNY artefakt z najlepszymi HP (refit na train+test jeśli fit_on
+         tego wymaga) — dopiero ten krok pokazuje modelowi test.
+    Selekcja (KS, HPO, porównanie) NIGDY nie trenuje na test; train+test wchodzi
+    wyłącznie do produkcyjnego .joblib. Zwraca DataFrame z podsumowaniem.
 
     df, prd     : DataFrame z kolumną 'data' i (df) 'label'
     auc_        : DataFrame z kolumnami 'feature', 'auc', 'ks'
@@ -357,8 +360,12 @@ def run(df, prd, auc_,
         best = None              # (ks, artifact, metrics)
         ks_search_combo = []     # log KS TYLKO dla tej kombinacji
         for ks, (feat, med) in ks_features.items():
+            # SELEKCJA KS: ZAWSZE trenuj na train, oceniaj na held-out test.
+            # NIE używamy tu fit_on='train+test' — inaczej model widziałby test
+            # w treningu i sel_score byłby in-sample (~1.0), a wybór KS nieuczciwy.
+            # Prawdziwe fit_on wchodzi dopiero przy finalnym refit (niżej).
             art, m = train_one(feat, med, train, test, prd_fit, prd_eval,
-                               spw, fit_on, pseudo,
+                               spw, "train", pseudo,
                                pseudo_low=pseudo_low, pseudo_high=pseudo_high)
             ks_search_combo.append({'ks':ks, **m})
             if best is None or m['sel_score'] > best[2]['sel_score']:
@@ -381,9 +388,21 @@ def run(df, prd, auc_,
                 param_grid=param_grid, objective=hpo_objective, n_iter=hpo_n_iter,
                 pseudo_low=pseudo_low, pseudo_high=pseudo_high)
             hpo_log.to_csv(os.path.join(analysis_dir, "hpo_search.csv"), index=False)
-            # Finalny trening z najlepszymi HP. Dla fit_on='train+test' DOPIERO TERAZ
-            # model widzi test; dla pseudo baza zawiera pseudo-labele.
-            best_art, best_m = train_one(
+
+        # --- METRYKI DO PORÓWNANIA 12 MODELI: uczciwe, out-of-sample (train -> test) ---
+        # Model liczony na train, oceniany na held-out test. Te metryki (best_m) idą do
+        # final_12_models.csv i sortu — dzięki temu modele train+test NIE wygrywają
+        # sztucznie sel_score'em ~1.0 liczonym in-sample.
+        best_art, best_m = train_one(
+            best_feat, best_med, train, test, prd_fit, prd_eval,
+            spw, "train", pseudo, params=best_params,
+            pseudo_low=pseudo_low, pseudo_high=pseudo_high)
+
+        # --- FINALNY ARTEFAKT PRODUKCYJNY: refit na PRAWDZIWYM fit_on ---
+        # Gdy wybrano fit_on='train+test', wybrany (KS+HP) model trenujemy TERAZ na
+        # train+test i to on ląduje w .joblib. best_m zostaje uczciwe (z train->test).
+        if fit_on != "train":
+            best_art, _ = train_one(
                 best_feat, best_med, train, test, prd_fit, prd_eval,
                 spw, fit_on, pseudo, params=best_params,
                 pseudo_low=pseudo_low, pseudo_high=pseudo_high)
