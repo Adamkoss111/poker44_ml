@@ -1,0 +1,14 @@
+{
+  "tag": "stack1_train_ps0",
+  "fit_on": "train",
+  "pseudo": false,
+  "spw": 1.0,
+  "reward_full": 0.9874,
+  "reward_daily": 0.9875,
+  "reward_daily_std": 0.0354,
+  "sel_score": 0.9698,
+  "ap": 0.996,
+  "bot_recall": 0.963,
+  "balance_eval": 0.102,
+  "n_members": 5
+}

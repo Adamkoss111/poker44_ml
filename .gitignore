@@ -1,0 +1,21 @@
+# === dane produkcyjne / ewaluacyjne — NIGDY publicznie ===
+api_data/
+prd_data/
+saved_synapses/
+*.csv
+*:Zone.Identifier
+
+# === runtime / cache / artefakty ===
+logs/
+__pycache__/
+*.py[cod]
+*.joblib
+production_models/
+my_models/
+.venv/
+validator_env/
+*.env
+.env
+
+# === notebooki często mają dane w outputach — trzymaj lokalnie ===
+*.ipynb
