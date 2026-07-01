@@ -160,15 +160,21 @@ def _xgb(params, spw):
 
 def _pseudo_rows(feature, med, train, prd_fit, spw, params, pseudo_low, pseudo_high):
     """Generuje wiersze pseudo-label z PRD modelem bazowym trenowanym TYLKO na train
-    (nie na test — zeby ocena na test pozostala uczciwa). Zwraca (X_ps, y_ps) lub (None, None)."""
+    (nie na test — zeby ocena na test pozostala uczciwa). Zwraca (X_ps, y_ps) lub (None, None).
+
+    UWAGA covariate-shift: model bazowy trenuje na train (qt_tr), ale PRD scoruje przez
+    qt_prd DOPASOWANY NA PRD — spójnie z inferencją produkcyjną. Użycie qt_tr na PRD
+    dawałoby przesunięte, nie-normalne wartości -> tendencyjne (jednostronne) pseudo-labele."""
     Xtr = train[feature].fillna(med); ytr = train['label'].values
-    qt, Xtr_n = _fit_qt(Xtr)
+    qt_tr, Xtr_n = _fit_qt(Xtr)
     m = _xgb(params, spw); m.fit(Xtr_n, ytr)
-    p = m.predict_proba(qt.transform(prd_fit[feature].fillna(med)))[:, 1]
+    Xprd = prd_fit[feature].fillna(med)
+    qt_pr, _ = _fit_qt(Xprd)                       # QT dopasowany na PRD (nie na train)
+    p = m.predict_proba(qt_pr.transform(Xprd))[:, 1]
     mask = (p > pseudo_high) | (p < pseudo_low)
     if mask.sum() == 0:
         return None, None
-    X_ps = prd_fit[feature].fillna(med)[mask]
+    X_ps = Xprd[mask]
     y_ps = (p[mask] > pseudo_high).astype(int)
     return X_ps, y_ps
 
@@ -255,12 +261,14 @@ def train_one(feature, med, train, test, prd_fit, prd_eval, spw, fit_on, pseudo,
                                  n_quantiles=min(200, len(prd_fit)), random_state=0)
     qt_prd.fit(prd_fit[feature].fillna(med))
 
+    n_ps_bot = n_ps_human = 0
     if pseudo:
         X_ps, y_ps = _pseudo_rows(feature, med, train, prd_fit, spw,
                                   params, pseudo_low, pseudo_high)
         if X_ps is not None:
             Xbase = pd.concat([Xbase, X_ps], axis=0)
             ybase = np.concatenate([ybase, y_ps])
+            n_ps_bot = int(np.sum(y_ps == 1)); n_ps_human = int(np.sum(y_ps == 0))
 
     qt_train, Xbase_n = _fit_qt(Xbase)
     model = _xgb(params, spw); model.fit(Xbase_n, ybase)
@@ -289,6 +297,7 @@ def train_one(feature, med, train, test, prd_fit, prd_eval, spw, fit_on, pseudo,
                'reward_daily_std':round(r_std,4),
                'fpr':round(fpr,3),'bot_recall':round(recall,3),'ap':round(ap,3),
                'balance_eval':round(balance,3),'sel_score':round(sel_score,4),
+               'pseudo_n_bot':n_ps_bot,'pseudo_n_human':n_ps_human,
                'n_features':len(feature),'params':dict(params)}
     return artifact, metrics
 
@@ -446,6 +455,10 @@ def run(df, prd, auc_,
         print(f"   -> najlepszy KS={best_ks} | reward_daily={best_m['reward_daily']} "
               f"(std={best_m['reward_daily_std']}) bot_recall={best_m['bot_recall']} "
               f"balance={best_m['balance_eval']}")
+        if pseudo:
+            print(f"      pseudo-labele: bot={best_m['pseudo_n_bot']} "
+                  f"human={best_m['pseudo_n_human']} "
+                  f"(jednostronne pseudo -> niski balance)")
         print(f"      HP={best_params}")
         print(f"      model/{model_name}.joblib  +  analysis/{model_name}/")
 

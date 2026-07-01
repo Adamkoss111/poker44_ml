@@ -187,15 +187,21 @@ def _fit_qt(X):
 
 
 def _pseudo_rows(feature, med, train, prd_fit, mtype, params, pseudo_low, pseudo_high, spw=1.0):
-    """Pseudo-label z PRD modelem bazowym (danego typu) trenowanym TYLKO na train."""
+    """Pseudo-label z PRD modelem bazowym (danego typu) trenowanym TYLKO na train.
+
+    UWAGA covariate-shift: model bazowy trenuje na train (qt_tr), ale PRD scoruje przez
+    qt_prd DOPASOWANY NA PRD — spójnie z inferencją. Użycie qt_tr na PRD dawałoby
+    przesunięte, nie-normalne wartości -> tendencyjne (jednostronne) pseudo-labele."""
     Xtr = train[feature].fillna(med); ytr = train['label'].values
-    qt, Xtr_n = _fit_qt(Xtr)
+    qt_tr, Xtr_n = _fit_qt(Xtr)
     m = _make_model(mtype, params, spw=spw); m.fit(Xtr_n, ytr)
-    p = m.predict_proba(qt.transform(prd_fit[feature].fillna(med)))[:, 1]
+    Xprd = prd_fit[feature].fillna(med)
+    qt_pr, _ = _fit_qt(Xprd)                       # QT dopasowany na PRD (nie na train)
+    p = m.predict_proba(qt_pr.transform(Xprd))[:, 1]
     mask = (p > pseudo_high) | (p < pseudo_low)
     if mask.sum() == 0:
         return None, None
-    return prd_fit[feature].fillna(med)[mask], (p[mask] > pseudo_high).astype(int)
+    return Xprd[mask], (p[mask] > pseudo_high).astype(int)
 
 
 def _sel_score(day_df):
@@ -214,12 +220,14 @@ def train_one_model(mtype, feature, med, train, test, prd_fit, prd_eval,
                                  n_quantiles=min(200, len(prd_fit)), random_state=0)
     qt_prd.fit(prd_fit[feature].fillna(med))
 
+    n_ps_bot = n_ps_human = 0
     if pseudo:
         X_ps, y_ps = _pseudo_rows(feature, med, train, prd_fit, mtype, params,
                                   pseudo_low, pseudo_high, spw=spw)
         if X_ps is not None:
             Xbase = pd.concat([Xbase, X_ps], axis=0)
             ybase = np.concatenate([ybase, y_ps])
+            n_ps_bot = int(np.sum(y_ps == 1)); n_ps_human = int(np.sum(y_ps == 0))
 
     qt_train, Xbase_n = _fit_qt(Xbase)
     model = _make_model(mtype, params, spw=spw); model.fit(Xbase_n, ybase)
@@ -237,6 +245,7 @@ def train_one_model(mtype, feature, med, train, test, prd_fit, prd_eval,
                'reward_daily_std': round(day_df['reward'].std(), 4),
                'sel_score': round(_sel_score(day_df), 4),
                'ap': round(m_full['ap'], 3), 'bot_recall': round(m_full['bot_recall'], 3),
+               'pseudo_n_bot': n_ps_bot, 'pseudo_n_human': n_ps_human,
                'n_features': len(feature)}
     return artifact, prob_te, prob_ev, metrics
 
@@ -333,9 +342,13 @@ def build_stack(ks_features, train, test, prd_fit, prd_eval, fit_on, pseudo,
         per_model_rows.append({'mtype': mtype, 'best_ks': best_ks,
                                'reward_full': m['reward_full'],
                                'sel_score': m['sel_score'], 'ap': m['ap'],
+                               'pseudo_n_bot': m['pseudo_n_bot'],
+                               'pseudo_n_human': m['pseudo_n_human'],
                                'params': json.dumps(best_params)})
+        _ps = (f" pseudo[bot={m['pseudo_n_bot']}/human={m['pseudo_n_human']}]"
+               if pseudo else "")
         print(f"      [{mtype}] KS={best_ks} reward_full={m['reward_full']} "
-              f"ap={m['ap']} sel={m['sel_score']}")
+              f"ap={m['ap']} sel={m['sel_score']}{_ps}")
 
     # STACK = zwykła średnia predykcji
     prob_te_avg = np.mean(np.column_stack(probs_te), axis=1)
