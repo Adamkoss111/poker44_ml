@@ -16,6 +16,9 @@ __pycache__/
 *.py[cod]
 *.joblib
 !published/*.joblib
+*.pkl
+catboost_info/
+**/fusion_models/analysis/
 models/
 production_models/
 my_models/
