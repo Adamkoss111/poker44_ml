@@ -6,11 +6,6 @@ from typing import Tuple
 import bittensor as bt
 
 from poker44.base.miner import BaseMinerNeuron
-from poker44.utils.model_manifest import (
-    build_local_model_manifest,
-    evaluate_manifest_compliance,
-    manifest_digest,
-)
 from poker44.validator.synapse import DetectionSynapse
 
 import sys
@@ -24,11 +19,14 @@ import json
 from datetime import datetime
 
 ROOT_DIR = Path(__file__).resolve().parents[1]
+SOLUTION_DIR = ROOT_DIR / "my_solution2"
 sys.path.append(str(ROOT_DIR))
-sys.path.append(str(ROOT_DIR / "my_solution"))
+sys.path.append(str(SOLUTION_DIR))
 
 # pakiet features/ — JEDNO źródło prawdy o cechach (v1..v5, prefiksy w środku)
 from features import compute_features
+# scentralizowany builder manifestu (repo_url/repo_commit/atestacje -> "transparent")
+from manifest_utils import build_manifest
 
 
 def _window_chunk(chunk, window=40, min_tail=20):
@@ -64,7 +62,7 @@ class Miner(BaseMinerNeuron):
         super(Miner, self).__init__(config=config)
         bt.logging.info("🤖 Poker44 Fusion Miner started")
 
-        model_file = os.getenv("POKER44_MODEL_FILE", "published/model2.joblib")
+        model_file = os.getenv("POKER44_MODEL_FILE", "published/model4_chunk.joblib")
         model_path = ROOT_DIR / model_file
         try:
             self.artifact = joblib.load(model_path)
@@ -88,29 +86,25 @@ class Miner(BaseMinerNeuron):
             self.artifact = None
             self.mode = None
 
-        self.model_manifest = build_local_model_manifest(
+        self.model_manifest, self.manifest_compliance, self.manifest_digest = build_manifest(
             repo_root=ROOT_DIR,
+            model_path=model_path,
+            model_name="miner-4-chunk",
+            model_version="4",
+            framework="stacked-ensemble",
             implementation_files=[
                 Path(__file__).resolve(),
-                ROOT_DIR / "my_solution" / "features" / "__init__.py",
-                ROOT_DIR / "my_solution" / "features" / "base.py",
-                ROOT_DIR / "my_solution" / "features" / "temporal.py",
-                ROOT_DIR / "my_solution" / "features" / "literature.py",
-                ROOT_DIR / "my_solution" / "features" / "schema.py",
-                ROOT_DIR / "my_solution" / "features" / "tells.py",
-                ROOT_DIR / "my_solution" / "stacked_top1.py",
-                ROOT_DIR / "my_solution" / "calibration_top1.py",
+                SOLUTION_DIR / "features" / "__init__.py",
+                SOLUTION_DIR / "features" / "base.py",
+                SOLUTION_DIR / "features" / "temporal.py",
+                SOLUTION_DIR / "features" / "literature.py",
+                SOLUTION_DIR / "features" / "schema.py",
+                SOLUTION_DIR / "features" / "tells.py",
+                SOLUTION_DIR / "stacked_top1.py",
+                SOLUTION_DIR / "calibration_top1.py",
                 ROOT_DIR / "poker44" / "validator" / "payload_view.py",
             ],
-            defaults={
-                "model_name": "miner-2-fusion",
-                "model_version": "2",
-                "framework": "stacked-ensemble",
-                "license": "MIT",
-            },
         )
-        self.manifest_compliance = evaluate_manifest_compliance(self.model_manifest)
-        self.manifest_digest = manifest_digest(self.model_manifest)
         bt.logging.info(
             f"Manifest: status={self.manifest_compliance['status']} "
             f"repo_commit={self.model_manifest.get('repo_commit','')[:12]} "
