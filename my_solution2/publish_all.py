@@ -41,7 +41,8 @@ MAP = DST / "commit_map.json"
 # Na razie jeden miner. ZMIEŃ 'S1_core.joblib' na artefakt, który faktycznie
 # ma jechać jako miner5 (patrz my_solution2/fusion_models/model/).
 MODELS = {
-    "model5.joblib": SRC_DIR / "S1_core.joblib",
+    "model5.joblib":       SRC_DIR / "S1_core.joblib",        # miner5 (aspik5)
+    "model4_chunk.joblib": SRC_DIR / "S1_core_chunk.joblib",  # miner4_chunk (aspik4)
 }
 
 

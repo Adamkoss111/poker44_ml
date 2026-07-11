@@ -29,3 +29,6 @@ validator_env/
 
 # === notebooki często mają dane w outputach — trzymaj lokalnie ===
 *.ipynb
+
+# duże archiwa — nigdy do repo
+*.zip

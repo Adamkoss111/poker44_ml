@@ -1,7 +1,6 @@
-"""Reference Poker44 miner with simple chunk-level behavioral heuristics."""
+"""Poker44 miner — fusion StackedEnsemble na cechach z pakietu features/."""
 
 import time
-from collections import Counter
 from typing import Tuple
 
 import bittensor as bt
@@ -24,57 +23,64 @@ import joblib
 import json
 from datetime import datetime
 
-# Dodajemy folder główny do PATH, aby bez problemu zaimportować create_features2
 ROOT_DIR = Path(__file__).resolve().parents[1]
 sys.path.append(str(ROOT_DIR))
 sys.path.append(str(ROOT_DIR / "my_solution"))
 
-from create_features3 import extract_chunk_features
-from create_features4 import extract_chunk_features_v2
-from create_features5 import extract_chunk_features_v3
-from create_features6 import extract_chunk_features_v4
+# pakiet features/ — JEDNO źródło prawdy o cechach (v1..v5, prefiksy w środku)
+from features import compute_features
 from manifest_utils import build_manifest
 
 
 class Miner(BaseMinerNeuron):
-    """
-    Miner wykorzystujący model XGBoost (.pkl) na cechach z create_features2.py.
-    """
+    """Miner ładujący artefakt fusion (train_fusion.py):
+    {'feature','median','qt_calib','model': StackedEnsemble}.
+    Obsługuje też stary format mean-stacka ({'members': [...]}) jako fallback."""
 
     def __init__(self, config=None):
         super(Miner, self).__init__(config=config)
-        bt.logging.info("🤖 XGBoost Poker44 Miner started")
+        bt.logging.info("🤖 Poker44 Fusion Miner started")
 
-        # Ładujemy CAŁY artefakt (model + qt_prd + median + feature), nie sam model
         model_file = os.getenv("POKER44_MODEL_FILE", "published/model2.joblib")
         model_path = ROOT_DIR / model_file
         try:
             self.artifact = joblib.load(model_path)
-            self.model    = self.artifact["model"]
-            self.feature  = self.artifact["feature"]
-            self.median   = self.artifact["median"]
-            self.qt_prd   = self.artifact["qt_prd"]
-            bt.logging.info(f"Loaded detector artifact from: {model_path} "
-                            f"({len(self.feature)} features)")
+            if "members" in self.artifact:
+                self.mode = "members"                       # stary mean-stack
+                info = f"{len(self.artifact['members'])} members (stary format)"
+            else:
+                self.mode = "fusion"                        # StackedEnsemble
+                self.model   = self.artifact["model"]
+                self.feature = self.artifact["feature"]
+                self.median  = self.artifact["median"]
+                self.qt_calib = self.artifact["qt_calib"]
+                cfg = self.artifact.get("config", {})
+                info = (f"fusion: {len(self.feature)} cech, "
+                        f"meta={cfg.get('meta')} bazy={cfg.get('model_types')} "
+                        f"refit_full={cfg.get('refit_full')}")
+            bt.logging.info(f"Loaded artifact from {model_path}: {info}")
         except Exception as e:
             bt.logging.warning(f"Could NOT load artifact from {model_path}. "
                                f"Predicts will default to 0.5. Error: {e}")
             self.artifact = None
-            self.model = None
-            
-        repo_root = Path(__file__).resolve().parents[1]
+            self.mode = None
+
         self.model_manifest, self.manifest_compliance, self.manifest_digest = build_manifest(
             repo_root=ROOT_DIR,
             model_path=model_path,
-            model_name="miner-2-xgboost",
+            model_name="miner-2-fusion",
             model_version="2",
-            framework="xgboost",
+            framework="stacked-ensemble",
             implementation_files=[
                 Path(__file__).resolve(),
-                ROOT_DIR / "my_solution" / "create_features3.py",
-                ROOT_DIR / "my_solution" / "create_features4.py",
-                ROOT_DIR / "my_solution" / "create_features5.py",
-                ROOT_DIR / "my_solution" / "create_features6.py",
+                ROOT_DIR / "my_solution" / "features" / "__init__.py",
+                ROOT_DIR / "my_solution" / "features" / "base.py",
+                ROOT_DIR / "my_solution" / "features" / "temporal.py",
+                ROOT_DIR / "my_solution" / "features" / "literature.py",
+                ROOT_DIR / "my_solution" / "features" / "schema.py",
+                ROOT_DIR / "my_solution" / "features" / "tells.py",
+                ROOT_DIR / "my_solution" / "stacked_top1.py",
+                ROOT_DIR / "my_solution" / "calibration_top1.py",
                 ROOT_DIR / "poker44" / "validator" / "payload_view.py",
             ],
         )
@@ -84,26 +90,18 @@ class Miner(BaseMinerNeuron):
             f"artifact_sha256={self.model_manifest.get('artifact_sha256','')[:12]} "
             f"violations={self.manifest_compliance.get('policy_violations')}"
         )
-
         bt.logging.info(f"Axon created: {self.axon}")
 
     async def forward(self, synapse: DetectionSynapse) -> DetectionSynapse:
-        """Przypisz score predykcyjny bota na podstawie XGBoost dla każdego chunku."""
         chunks = synapse.chunks or []
-        
-        # Zapis synapsy z datą i godziną (co do sekundy)
+
         try:
-            # Tworzymy folder 'saved_synapses' w folderze głównym projektu
             out_dir = ROOT_DIR / "saved_synapses"
             out_dir.mkdir(exist_ok=True)
-            
-            # Format: 'synapse_20260308_190530.json' (Z RRRRMMDD_GGMMSS)
             timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
             filename = out_dir / f"synapse1_{timestamp}.json"
-            
             with open(filename, "w", encoding="utf-8") as f:
                 json.dump(chunks, f, indent=2)
-                
             bt.logging.info(f"Saved incoming synapse chunks to {filename.name}")
         except Exception as e:
             bt.logging.warning(f"Failed to save synapse to JSON: {e}")
@@ -111,36 +109,49 @@ class Miner(BaseMinerNeuron):
         scores = [self.score_chunk(chunk) for chunk in chunks]
         synapse.risk_scores = scores
         synapse.predictions = [bool(s >= 0.5) for s in scores]
-        
-        # Manifest added to the prediction/synapse
         synapse.model_manifest = dict(self.model_manifest)
-        
+
         bt.logging.info(f"Miner Predictions: {synapse.predictions}")
-        bt.logging.info(f"Scored {len(chunks)} chunks with XGBoost model.")
+        bt.logging.info(f"Scored {len(chunks)} chunks (mode={self.mode}).")
         return synapse
 
     @staticmethod
     def _clamp01(value: float) -> float:
         return max(0.0, min(1.0, value))
 
+    def _predict_fusion(self, feat_df: pd.DataFrame) -> float:
+        """StackedEnsemble: dopasuj cechy -> mediana -> qt_calib -> predict_proba."""
+        df = feat_df.copy()
+        for col in self.feature:
+            if col not in df.columns:
+                df[col] = np.nan
+        df = df[self.feature].fillna(self.median)
+        Xn = self.qt_calib.transform(df)
+        return float(self.model.predict_proba(np.asarray(Xn, dtype=float))[0][1])
+
+    def _predict_members(self, feat_df: pd.DataFrame) -> float:
+        """Fallback: stary mean-stack (lista members, każdy z własnym qt)."""
+        cols = []
+        for member in self.artifact["members"]:
+            feat = member["feature"]; med = member["median"]
+            df = feat_df.copy()
+            for col in feat:
+                if col not in df.columns:
+                    df[col] = np.nan
+            df = df[feat].fillna(med)
+            Xn = member["qt_calib"].transform(df) if "qt_calib" in member else member["qt_prd"].transform(df)
+            cols.append(member["model"].predict_proba(Xn)[:, 1])
+        return float(np.mean(np.column_stack(cols), axis=1)[0])
+
     def score_chunk(self, chunk: list[dict]) -> float:
         if not chunk:
-            return 0.0
-        if self.model is None:
-            return 0.5   # brak modelu -> neutralnie (nie 0.0!)
+            return 0.5
+        if self.artifact is None:
+            return 0.5
 
-        # 1. Ekstrakcja cech: v1 + v2 + v3
+        # 1. cechy — pakiet features/ (te same prefiksy co w treningu)
         try:
-            f1 = extract_chunk_features(chunk) or {}
-            f2 = extract_chunk_features_v2(chunk) or {}
-            f3 = extract_chunk_features_v3(chunk) or {}
-            f4 = extract_chunk_features_v4(chunk) or {}
-            
-            f2 = {"new_" + key: val for key, val in f2.items()}
-            f3 = {"new2_" + key: val for key, val in f3.items()}
-            f4 = {"new3_" + key: val for key, val in f4.items()}
-            
-            features = {**f1, **f2, **f3, **f4}
+            features = compute_features(chunk)
             if not features:
                 bt.logging.warning("Empty features for chunk.")
                 return 0.5
@@ -149,43 +160,27 @@ class Miner(BaseMinerNeuron):
             bt.logging.warning(f"Error calculating features: {e}")
             return 0.5
 
-        # 2. Dopasuj do dokładnej listy cech modelu (kolejność + braki)
-        for col in self.feature:
-            if col not in df.columns:
-                df[col] = np.nan
-        df = df[self.feature]   # tylko wybrane cechy, w tej samej kolejności
-
-        # 3. Imputacja medianą z train (NIE -1!)
-        df = df.fillna(self.median)
-
-        # 4. Quantile-normalizacja zamrożonym qt_prd
+        # 2. predykcja wg formatu artefaktu
         try:
-            Xn = self.qt_prd.transform(df)
+            if self.mode == "fusion":
+                p = self._predict_fusion(df)
+            else:
+                p = self._predict_members(df)
+            return self._clamp01(round(p, 6))
         except Exception as e:
-            bt.logging.error(f"qt_prd transform error: {e}")
-            return 0.5
-
-        # 5. Predykcja
-        try:
-            proba = self.model.predict_proba(Xn)
-            bot_risk = float(proba[0][1])
-            return self._clamp01(round(bot_risk, 6))
-        except Exception as e:
-            bt.logging.error(f"XGBoost prediction error: {e}")
+            bt.logging.error(f"Prediction error: {e}")
             return 0.5
 
     async def blacklist(self, synapse: DetectionSynapse) -> Tuple[bool, str]:
-        """Determine whether to blacklist incoming requests."""
         return self.common_blacklist(synapse)
 
     async def priority(self, synapse: DetectionSynapse) -> float:
-        """Assign priority based on caller's stake."""
         return self.caller_priority(synapse)
 
 
 if __name__ == "__main__":
     with Miner() as miner:
-        bt.logging.info("Random miner running...")
+        bt.logging.info("Fusion miner running...")
         while True:
             bt.logging.info(f"Miner UID: {miner.uid} | Incentive: {miner.metagraph.I[miner.uid]}")
             time.sleep(60)

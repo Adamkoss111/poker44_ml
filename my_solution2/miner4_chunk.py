@@ -6,6 +6,11 @@ from typing import Tuple
 import bittensor as bt
 
 from poker44.base.miner import BaseMinerNeuron
+from poker44.utils.model_manifest import (
+    build_local_model_manifest,
+    evaluate_manifest_compliance,
+    manifest_digest,
+)
 from poker44.validator.synapse import DetectionSynapse
 
 import sys
@@ -19,14 +24,25 @@ import json
 from datetime import datetime
 
 ROOT_DIR = Path(__file__).resolve().parents[1]
-SOLUTION_DIR = ROOT_DIR / "my_solution2"
 sys.path.append(str(ROOT_DIR))
-sys.path.append(str(SOLUTION_DIR))
+sys.path.append(str(ROOT_DIR / "my_solution"))
 
 # pakiet features/ — JEDNO źródło prawdy o cechach (v1..v5, prefiksy w środku)
 from features import compute_features
-# scentralizowany builder manifestu (repo_url/repo_commit/atestacje -> "transparent")
-from manifest_utils import build_manifest
+
+
+def _window_chunk(chunk, window=40, min_tail=20):
+    """Tnie długi chunk live (80-100 rąk) na okna ~40 rąk = reżim treningowy.
+    Model trenuje na chunkach 30-40 rąk; cechy CV/std/entropy zależą od długości
+    serii, więc długi chunk NASYCA model (wszystko ~0.95, std 0.02 — zmierzone).
+    Okna przywracają rozdzielczość (std 0.15). Ogon < min_tail doklejany jest
+    pominięty tylko gdy są już inne okna."""
+    if len(chunk) <= window + min_tail:
+        return [chunk]
+    wins = [chunk[i:i + window] for i in range(0, len(chunk), window)]
+    if len(wins) > 1 and len(wins[-1]) < min_tail:
+        wins = wins[:-1]
+    return wins
 
 
 def _apply_calibration(p, artifact):
@@ -48,7 +64,7 @@ class Miner(BaseMinerNeuron):
         super(Miner, self).__init__(config=config)
         bt.logging.info("🤖 Poker44 Fusion Miner started")
 
-        model_file = os.getenv("POKER44_MODEL_FILE", "published/model5.joblib")
+        model_file = os.getenv("POKER44_MODEL_FILE", "published/model2.joblib")
         model_path = ROOT_DIR / model_file
         try:
             self.artifact = joblib.load(model_path)
@@ -72,25 +88,29 @@ class Miner(BaseMinerNeuron):
             self.artifact = None
             self.mode = None
 
-        self.model_manifest, self.manifest_compliance, self.manifest_digest = build_manifest(
+        self.model_manifest = build_local_model_manifest(
             repo_root=ROOT_DIR,
-            model_path=model_path,
-            model_name="miner-5-fusion",
-            model_version="5",
-            framework="stacked-ensemble",
             implementation_files=[
                 Path(__file__).resolve(),
-                SOLUTION_DIR / "features" / "__init__.py",
-                SOLUTION_DIR / "features" / "base.py",
-                SOLUTION_DIR / "features" / "temporal.py",
-                SOLUTION_DIR / "features" / "literature.py",
-                SOLUTION_DIR / "features" / "schema.py",
-                SOLUTION_DIR / "features" / "tells.py",
-                SOLUTION_DIR / "stacked_top1.py",
-                SOLUTION_DIR / "calibration_top1.py",
+                ROOT_DIR / "my_solution" / "features" / "__init__.py",
+                ROOT_DIR / "my_solution" / "features" / "base.py",
+                ROOT_DIR / "my_solution" / "features" / "temporal.py",
+                ROOT_DIR / "my_solution" / "features" / "literature.py",
+                ROOT_DIR / "my_solution" / "features" / "schema.py",
+                ROOT_DIR / "my_solution" / "features" / "tells.py",
+                ROOT_DIR / "my_solution" / "stacked_top1.py",
+                ROOT_DIR / "my_solution" / "calibration_top1.py",
                 ROOT_DIR / "poker44" / "validator" / "payload_view.py",
             ],
+            defaults={
+                "model_name": "miner-2-fusion",
+                "model_version": "2",
+                "framework": "stacked-ensemble",
+                "license": "MIT",
+            },
         )
+        self.manifest_compliance = evaluate_manifest_compliance(self.model_manifest)
+        self.manifest_digest = manifest_digest(self.model_manifest)
         bt.logging.info(
             f"Manifest: status={self.manifest_compliance['status']} "
             f"repo_commit={self.model_manifest.get('repo_commit','')[:12]} "
@@ -135,7 +155,8 @@ class Miner(BaseMinerNeuron):
         df = df[self.feature].fillna(self.median)
         Xn = self.qt_calib.transform(df)
         p = self.model.predict_proba(np.asarray(Xn, dtype=float))[:, 1]
-        return float(_apply_calibration(p, self.artifact)[0])
+        p_cal = _apply_calibration(p, self.artifact)
+        return float(np.mean(p_cal))   # średnia po oknach chunka
 
     def _predict_members(self, feat_df: pd.DataFrame) -> float:
         """Fallback: stary mean-stack (lista members, każdy z własnym qt)."""
@@ -149,7 +170,7 @@ class Miner(BaseMinerNeuron):
             df = df[feat].fillna(med)
             Xn = member["qt_calib"].transform(df) if "qt_calib" in member else member["qt_prd"].transform(df)
             cols.append(member["model"].predict_proba(Xn)[:, 1])
-        return float(np.mean(np.column_stack(cols), axis=1)[0])
+        return float(np.mean(np.column_stack(cols)))   # średnia po oknach i members
 
     def score_chunk(self, chunk: list[dict]) -> float:
         if not chunk:
@@ -157,13 +178,15 @@ class Miner(BaseMinerNeuron):
         if self.artifact is None:
             return 0.5
 
-        # 1. cechy — pakiet features/ (te same prefiksy co w treningu)
+        # 1. cechy — pakiet features/, per OKNO ~40 rąk (reżim treningowy)
         try:
-            features = compute_features(chunk)
-            if not features:
+            windows = _window_chunk(chunk)
+            rows = [compute_features(w) for w in windows]
+            rows = [r for r in rows if r]
+            if not rows:
                 bt.logging.warning("Empty features for chunk.")
                 return 0.5
-            df = pd.DataFrame([features])
+            df = pd.DataFrame(rows)
         except Exception as e:
             bt.logging.warning(f"Error calculating features: {e}")
             return 0.5
